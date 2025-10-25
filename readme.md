@@ -1,4 +1,4 @@
-# Distributed Emergency Alert System — One-Page Project Proposal
+# Distributed Emergency Alert System — Project Proposal
 
 ## Project Idea
 
