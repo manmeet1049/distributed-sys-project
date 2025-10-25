@@ -1,0 +1,106 @@
+# Generic .gitignore for a monorepo with Go and Python services
+
+# =================
+# OS / Editor
+# =================
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Icon?
+*.swp
+*~ 
+.vscode/
+.idea/
+*.iml
+
+# =================
+# Logs
+# =================
+logs/
+*.log
+
+# =================
+# Go
+# =================
+# Binaries for programs and plugins
+**/bin/
+**/build/bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binaries and build outputs
+**/*_test
+*.test
+*.out
+coverage.out
+
+# Build caches (usually outside repo, but ignore if present)
+Godeps/
+*.exe~
+# Go module cache (if accidentally checked in)
+pkg/
+# Optional: ignore IDE/tooling cache
+*.modcache
+
+# =================
+# Python
+# =================
+# Byte-compiled / optimized / cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+. env/    # common accidental name
+.Python
+
+# Packaging / distribution
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Test / type-check caches
+.pytest_cache/
+.mypy_cache/
+.pytype/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Environment files
+.env
+.env.*            # ignore environment variants (keep .env.example in repo)
+
+# PyInstaller
+*.manifest
+*.spec
+
+# =================
+# Monorepo / CI / build
+# =================
+# common build output dirs
+build/
+dist/
+out/
+target/
+
+# temporary files and caches
+.cache/
+.tmp/
+*.lock
+
+# =================
+# Misc
+# =================
+# lock files or runtime state you don't want committed (adjust as needed)
+*.pid
+*.seed
