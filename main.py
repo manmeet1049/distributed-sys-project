@@ -2,9 +2,12 @@ import asyncio
 import logging
 import socket
 import sys
+import netifaces
 from typing import Optional
 
+
 from services.discovery import DiscoveryService
+from services.messaging_service import MessagingService
 
 
 # Configure logging
@@ -33,6 +36,8 @@ class Node:
         self.host = host
         self.port = port
         self.addr = (host, port)
+        self.is_leader = False
+        self.leader_id: Optional[str] = None
         self.logger = logging.getLogger(f"Node-{node_id}")
 
         # Network communication
@@ -42,8 +47,20 @@ class Node:
         # Peers: store connected nodes {node_id: (host, port)}
         self.peers = {}
 
-        # Discovery service
+        # Discovery service (now uses multicast only)
         self.discovery_service = DiscoveryService(self)
+
+        #Messaging service
+        self.messaging = MessagingService(self)
+        # ------------------------------------------------------------------
+        # NEW: Simple receive handler (no causal ordering)
+        # ------------------------------------------------------------------
+        async def on_message(msg: Message):
+            print(f"\n[RECEIVED] {msg.sender_id} #{msg.seq}: {msg.payload}")
+
+        self.messaging.on_message_received = on_message
+
+        self.logger.info(f"Node initialized: {self.id} at {self.host}:{self.port}")
 
         self.logger.info(
             f"Node initialized: {self.id} at {self.host}:{self.port}")
@@ -56,6 +73,8 @@ class Node:
                 socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(
                 socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_socket.setsockopt(
+                socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             self.server_socket.bind(self.addr)
             self.server_socket.listen(5)
             self.server_socket.setblocking(False)
@@ -67,6 +86,7 @@ class Node:
             # Run server tasks concurrently
             await asyncio.gather(
                 self.discovery_service.start(),
+                self.messaging.start(),
                 self._accept_connections(),
                 self._handle_input(),
             )
@@ -144,12 +164,35 @@ class Node:
             try:
                 # Read input in a non-blocking way
                 user_input = await loop.run_in_executor(None, input, f"[{self.id}]> ")
+                parts = user_input.strip().split(maxsplit=1)
+                cmd = parts[0].lower() if parts else ""
 
                 if user_input.lower() == "exit":
                     await self.shutdown()
                     break
                 elif user_input.lower() == "peers":
                     self.logger.info(f"Known peers: {self.peers}")
+                elif cmd == "multicast" and len(parts) > 1:
+                    payload = {"type": "CHAT", "text": parts[1]}
+                    await self.messaging.multicast_message(payload)
+                    self.logger.info("Multicast sent")
+
+                elif cmd == "leader" and len(parts) > 1:
+                    payload = {"cmd": "LEADER", "data": parts[1]}
+                    await self.messaging.send_message_to_leader(payload)
+                    self.logger.info("Sent to leader")
+                elif cmd == "message" and len(parts) > 1:
+                    print(cmd)
+                    print(len(parts))
+                    peer_id = parts[1].split()[0]
+                    payload = {"type": "CHAT", "text": parts[1].split()[1]}
+                    await self.messaging.send_to(peer_id ,payload)
+                    self.logger.info("Message sent to peer")
+
+                elif cmd == "setleader" and len(parts) > 1:
+                    self.leader_id = parts[1]
+                    self.is_leader = (parts[1] == self.id)
+                    self.logger.info(f"Leader set to {self.leader_id}")
                 elif user_input.startswith("connect"):
                     # Format: connect <host> <port> <peer_id>
                     parts = user_input.split()
@@ -159,7 +202,7 @@ class Node:
                         self.logger.warning(
                             "Usage: connect <host> <port> <peer_id>")
                 else:
-                    self.logger.info(f"Unknown command: {user_input}")
+                    self.logger.info("Commands: peers | multicast <msg> | leader <msg> | setleader <id> | exit | connect | transmission")
 
             except EOFError:
                 await self.shutdown()
@@ -206,7 +249,7 @@ class Node:
 
         # Shutdown discovery service
         await self.discovery_service.shutdown()
-
+        await self.messaging.shutdown()
         if self.server_socket:
             self.server_socket.close()
         self.logger.info("Node shutdown complete")
@@ -221,7 +264,9 @@ def main():
 
     node_id = sys.argv[1]
     port = int(sys.argv[2])
-    host = "127.0.0.1"
+    iface = netifaces.gateways()['default'][netifaces.AF_INET][1]
+    host = netifaces.ifaddresses(iface)[netifaces.AF_INET][0]['addr']
+    # host = "192.168.2.120"  # Use your local network broadcast or host IP as needed
 
     node = Node(node_id, host, port)
 

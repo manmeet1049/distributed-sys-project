@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import socket
+import netifaces
 from typing import Callable, Optional
 
 
@@ -21,9 +22,9 @@ class DiscoveryService:
     Each node also listens for HELLO messages from other nodes.
     """
 
-    # Broadcast configuration
-    BROADCAST_ADDR = "255.255.255.255"
-    BROADCAST_PORT = 9999
+    # Multicast configuration
+    MCAST_GRP = '239.255.0.1'
+    MCAST_PORT = 50000
     BROADCAST_INTERVAL = 5  # seconds
     PEER_TIMEOUT = 15  # seconds
 
@@ -38,8 +39,7 @@ class DiscoveryService:
         self.logger = logging.getLogger(f"Discovery-{node.id}")
 
         # Sockets
-        self.broadcast_socket: Optional[socket.socket] = None
-        self.listen_socket: Optional[socket.socket] = None
+        self.mcast_socket: Optional[socket.socket] = None
 
         # State
         self.running = False
@@ -59,7 +59,7 @@ class DiscoveryService:
             # Broadcast immediately to announce presence to existing nodes
             await self._send_hello_broadcast()
 
-            # Run broadcast and listen tasks concurrently
+            # Run multicast and listen tasks concurrently
             await asyncio.gather(
                 self._broadcast_hello(),
                 self._listen_for_peers(),
@@ -71,29 +71,38 @@ class DiscoveryService:
             await self.shutdown()
 
     def _setup_sockets(self):
-        """Set up UDP sockets for broadcast and listening."""
-        # Broadcast socket
-        self.broadcast_socket = socket.socket(
-            socket.AF_INET, socket.SOCK_DGRAM)
-        self.broadcast_socket.setsockopt(
-            socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.broadcast_socket.setsockopt(
-            socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-
-        # Listen socket
-        self.listen_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.listen_socket.setsockopt(
-            socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.listen_socket.bind(("0.0.0.0", self.BROADCAST_PORT))
-        self.listen_socket.setblocking(False)
-
+        """Set up UDP socket for multicast send and receive."""
+        # ----- FIX FOR MACOS: Join multicast using actual interface -----
+        # Detect default interface (e.g. en0)
+        iface = netifaces.gateways()['default'][netifaces.AF_INET][1]
+        ip_addr = netifaces.ifaddresses(iface)[netifaces.AF_INET][0]['addr']
+        import struct
+        self.mcast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        self.mcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            self.mcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except AttributeError:
+            pass  # Not all systems support SO_REUSEPORT
+        self.mcast_socket.bind(("0.0.0.0", self.MCAST_PORT))
+        # self.logger.info(f"bound to {ip_addr}:{self.MCAST_PORT}")
+        
+        # Join multicast group
+        mreq = struct.pack("4s4s", socket.inet_aton(self.MCAST_GRP), socket.inet_aton(ip_addr))
+        self.mcast_socket.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        self.mcast_socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+        self.mcast_socket.setsockopt(
+            socket.IPPROTO_IP,
+            socket.IP_MULTICAST_IF,
+            socket.inet_aton(ip_addr)
+        )
+        
+        self.mcast_socket.setblocking(False)
         self.logger.info(
-            f"Sockets configured - Broadcast: {self.BROADCAST_ADDR}:{self.BROADCAST_PORT}, "
-            f"Listen: 0.0.0.0:{self.BROADCAST_PORT}"
+            f"Multicast socket configured - Group: {self.MCAST_GRP}:{self.MCAST_PORT}"
         )
 
     async def _send_hello_broadcast(self):
-        """Send an immediate HELLO broadcast (called at startup)."""
+        """Send an immediate HELLO multicast (called at startup)."""
         try:
             loop = asyncio.get_event_loop()
             message = {
@@ -106,18 +115,18 @@ class DiscoveryService:
 
             await loop.run_in_executor(
                 None,
-                self.broadcast_socket.sendto,
+                self.mcast_socket.sendto,
                 payload,
-                (self.BROADCAST_ADDR, self.BROADCAST_PORT),
+                (self.MCAST_GRP, self.MCAST_PORT)
             )
 
             self.logger.info(
-                f"Initial HELLO broadcast sent from {self.node.id}")
+                f"Initial HELLO multicast sent from {self.node.id}")
         except Exception as e:
             self.logger.error(f"Error sending initial HELLO: {e}")
 
     async def _broadcast_hello(self):
-        """Periodically broadcast HELLO message to the network."""
+        """Periodically multicast HELLO message to the network."""
         loop = asyncio.get_event_loop()
 
         while self.running:
@@ -131,32 +140,31 @@ class DiscoveryService:
                 }
                 payload = json.dumps(message).encode('utf-8')
 
-                # Broadcast to network
+                # Multicast to network
                 await loop.run_in_executor(
                     None,
-                    self.broadcast_socket.sendto,
+                    self.mcast_socket.sendto,
                     payload,
-                    (self.BROADCAST_ADDR, self.BROADCAST_PORT),
+                    (self.MCAST_GRP, self.MCAST_PORT),
                 )
 
-                self.logger.debug(f"Broadcast HELLO from {self.node.id}")
+                self.logger.debug(f"Multicast HELLO from {self.node.id}")
 
-                # Wait before next broadcast
+                # Wait before next multicast
                 await asyncio.sleep(self.BROADCAST_INTERVAL)
 
             except Exception as e:
-                self.logger.error(f"Error broadcasting HELLO: {e}")
+                self.logger.error(f"Error multicasting HELLO: {e}")
                 await asyncio.sleep(1)
 
     async def _listen_for_peers(self):
-        """Listen for HELLO messages from other nodes."""
+        """Listen for HELLO messages from other nodes via multicast."""
         loop = asyncio.get_event_loop()
 
         while self.running:
             try:
-                # Use select with timeout for efficient non-blocking listen
                 try:
-                    data, addr = self.listen_socket.recvfrom(4096)
+                    data, addr = self.mcast_socket.recvfrom(4096)
 
                     try:
                         message = json.loads(data.decode('utf-8'))
@@ -167,9 +175,9 @@ class DiscoveryService:
                     except json.JSONDecodeError:
                         self.logger.warning(
                             f"Invalid JSON message from {addr}")
+                            
 
                 except BlockingIOError:
-                    # No data available, small sleep to prevent busy-waiting
                     await asyncio.sleep(0.01)
 
             except Exception as e:
@@ -252,9 +260,7 @@ class DiscoveryService:
         """Gracefully shutdown the discovery service."""
         self.running = False
 
-        if self.broadcast_socket:
-            self.broadcast_socket.close()
-        if self.listen_socket:
-            self.listen_socket.close()
+        if self.mcast_socket:
+            self.mcast_socket.close()
 
         self.logger.info("Discovery service shutdown complete")
