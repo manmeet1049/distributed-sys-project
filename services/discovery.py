@@ -23,8 +23,9 @@ class DiscoveryService:
     """
 
     # Multicast configuration
-    MCAST_GRP = '239.255.0.1'
+    MCAST_GRP = '224.0.0.251'
     MCAST_PORT = 50000
+    MCAST_PORT_STR = '50000'
     BROADCAST_INTERVAL = 5  # seconds
     PEER_TIMEOUT = 15  # seconds
 
@@ -83,17 +84,18 @@ class DiscoveryService:
             self.mcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         except AttributeError:
             pass  # Not all systems support SO_REUSEPORT
-        self.mcast_socket.bind(("0.0.0.0", self.MCAST_PORT))
+        self.mcast_socket.bind(('', self.MCAST_PORT))
         # self.logger.info(f"bound to {ip_addr}:{self.MCAST_PORT}")
         
         # Join multicast group
-        mreq = struct.pack("4s4s", socket.inet_aton(self.MCAST_GRP), socket.inet_aton(ip_addr))
-        self.mcast_socket.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        intf = socket.gethostbyname(socket.gethostname())
+        # mreq = struct.pack("4s4s", socket.inet_aton(self.MCAST_GRP)+socket.inet_aton(intf))
+        self.mcast_socket.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, socket.inet_aton(self.MCAST_GRP)+socket.inet_aton(intf))
         self.mcast_socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
         self.mcast_socket.setsockopt(
-            socket.IPPROTO_IP,
+            socket.SOL_IP,
             socket.IP_MULTICAST_IF,
-            socket.inet_aton(ip_addr)
+            socket.inet_aton(intf)
         )
         
         self.mcast_socket.setblocking(False)
