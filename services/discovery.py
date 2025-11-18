@@ -72,6 +72,30 @@ class DiscoveryService:
             await self.shutdown()
 
     def _setup_sockets(self):
+
+        def _get_local_ip(self) -> str:
+            """Get the local IP address on the default route (robust across OSes)"""
+            try:
+                # Connect to a remote server to force OS to pick the default route interface
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.settimeout(2)
+                s.connect(("8.8.8.8", 1))  # Doesn't send data
+                local_ip = s.getsockname()[0]
+                s.close()
+                return local_ip
+            except Exception as e:
+                self.logger.warning(f"Failed to auto-detect IP: {e}, falling back...")
+            
+            # Fallback: scan interfaces
+            for iface in netifaces.interfaces():
+                addrs = netifaces.ifaddresses(iface).get(netifaces.AF_INET)
+                if addrs:
+                    for addr in addrs:
+                        ip = addr['addr']
+                        if ip.startswith('127.') or ip.startswith('169.254.'):
+                            continue
+                        return ip
+            return "127.0.0.1"
         """Set up UDP socket for multicast send and receive."""
         # ----- FIX FOR MACOS: Join multicast using actual interface -----
         # Detect default interface (e.g. en0)
@@ -88,7 +112,7 @@ class DiscoveryService:
         # self.logger.info(f"bound to {ip_addr}:{self.MCAST_PORT}")
         
         # Join multicast group
-        intf = socket.gethostbyname(socket.gethostname())
+        intf = _get_local_ip(self)
         # mreq = struct.pack("4s4s", socket.inet_aton(self.MCAST_GRP)+socket.inet_aton(intf))
         self.mcast_socket.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, socket.inet_aton(self.MCAST_GRP)+socket.inet_aton(intf))
         self.mcast_socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
