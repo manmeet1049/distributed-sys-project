@@ -8,6 +8,7 @@ from collections import defaultdict
 from typing import Dict, Optional, Tuple, Callable, Any
 from Data.message import Message
 from services.causal_buffer import CausalBuffer
+from services.vector_causal_buffer import VectorCausalBuffer
 
 # ----------------------------------------------------------------------
 # Helper: get the local IP of the interface that has the default gateway
@@ -41,11 +42,12 @@ class MessagingService:
         self.node.discovery_service.on_peer_lost       = self._peer_lost
 
         # Causal buffer
-        self.causal_buffer = CausalBuffer()  # ← NEW
+        self.causal_buffer = VectorCausalBuffer(node)
 
         # Final handler (your app logic)
         async def final_handler(msg: Message):
-            print(f"\n[CAUSAL DELIVERY] {msg.sender_id} #{msg.seq}: {msg.payload}")
+            text = msg.payload.get("text", msg.payload)
+            print(f"\n[CAUSAL DELIVERY] [{msg.sender_id}] {text}")
 
         # Hook: receive → buffer → final
         self.on_message_received = lambda m: self.causal_buffer.deliver(m, final_handler)
@@ -75,6 +77,7 @@ class MessagingService:
             f"MessagingService listening on UDP {bind_addr}:{self.node.port}"
         )
         asyncio.create_task(self._receive_loop())
+        # asyncio.create_task(self._receive_multicast_loop())
 
     async def shutdown(self):
         if self.inbound_sock:
@@ -126,7 +129,7 @@ class MessagingService:
                 print(f"Decoded message: {msg}")
                 # RECONSTRUCT Message object
                 msg = Message.from_dict(msg)
-                print(msg)
+                print(f"test line:",msg)
 
                 # Identify sender (reverse lookup in our peer table)
                 sender_id = None
@@ -140,6 +143,8 @@ class MessagingService:
             except Exception as e:
                 self.node.logger.debug(f"Receive loop error: {e}")
                 await asyncio.sleep(0.01)
+    
+    
 
     async def _handle_incoming(self, sender_id: Optional[str], addr: Tuple[str, int], msg: Message):
         """Dispatch incoming message."""
@@ -178,24 +183,36 @@ class MessagingService:
         await self.send_to(self.node.leader_id, payload)
 
     async def multicast_message(self, payload: dict):
-        """Send the *same* message to every known peer."""
-        print("Multicasting message:", payload)
+        """Send ONE multicast packet to the entire network (224.0.0.251)"""
+        if not hasattr(self.node, 'discovery_service') or not self.node.discovery_service.mcast_socket:
+            self.node.logger.warning("Discovery service not ready — cannot multicast")
+            return
+
         msg = self._build_message(payload)
         framed = self._frame(msg.to_dict())
-        tasks = [self._send_raw(addr, payload) for addr in self.peers.values()]
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+
+        try:
+            # Reuse the same multicast socket that DiscoveryService created
+            mcast_sock = self.node.discovery_service.mcast_socket
+            loop = asyncio.get_event_loop()
+            await loop.sock_sendto(
+                mcast_sock,
+                framed,
+                (self.node.discovery_service.MCAST_GRP, self.node.discovery_service.MCAST_PORT)
+            )
+            self.node.logger.info(f"Multicast sent to {self.node.discovery_service.MCAST_GRP}:{self.node.discovery_service.MCAST_PORT}")
+        except Exception as e:
+            self.node.logger.error(f"Failed to send multicast: {e}")
 
     # ------------------------------------------------------------------
     # Helper: build a Message with a fresh seq counter
     # ------------------------------------------------------------------
     def _build_message(self, payload: dict, type: str = "APP") -> Message:
-        seq = self._out_seq[self.node.id]
-        self._out_seq[self.node.id] = seq + 1
+        self.node.vector_clock[self.node.id] = self.node.vector_clock.get(self.node.id, 0) + 1
         return Message(
             msg_id    = str(uuid.uuid4()),
             sender_id = self.node.id,
-            seq       = seq,
+            vector_clock = self.node.vector_clock.copy(),
             payload   = payload,
             type      = type,
         )

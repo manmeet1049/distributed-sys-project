@@ -8,6 +8,7 @@ from typing import Optional
 
 from services.discovery import DiscoveryService
 from services.messaging_service import MessagingService
+from Data.message import Message
 
 
 # Configure logging
@@ -35,8 +36,9 @@ class Node:
         self.id = node_id
         self.host = host
         self.port = port
-        self.addr = (host, port)
-        self.is_leader = False
+        self.addr = (host, port)            # Tuple for socket binding
+        self.vector_clock = {self.id: 0}    # Initialize vector clock
+        self.is_leader = False              # Flag to indicate if this node is the leader
         self.leader_id: Optional[str] = None
         self.logger = logging.getLogger(f"Node-{node_id}")
 
@@ -55,10 +57,10 @@ class Node:
         # ------------------------------------------------------------------
         # NEW: Simple receive handler (no causal ordering)
         # ------------------------------------------------------------------
-        async def on_message(msg: Message):
-            print(f"\n[RECEIVED] {msg.sender_id} #{msg.seq}: {msg.payload}")
+        # async def on_message(msg: Message):
+        #     print(f"\n[RECEIVED] {msg.sender_id} #{msg.seq}: {msg.payload}")
 
-        self.messaging.on_message_received = on_message
+        # self.messaging.on_message_received = on_message
 
         self.logger.info(f"Node initialized: {self.id} at {self.host}:{self.port}")
 
@@ -181,13 +183,15 @@ class Node:
                     payload = {"cmd": "LEADER", "data": parts[1]}
                     await self.messaging.send_message_to_leader(payload)
                     self.logger.info("Sent to leader")
-                elif cmd == "message" and len(parts) > 1:
-                    print(cmd)
-                    print(len(parts))
+                elif cmd == "message" and len(parts) >= 2:
+                    print(parts)
                     peer_id = parts[1].split()[0]
-                    payload = {"type": "CHAT", "text": parts[1].split()[1]}
-                    await self.messaging.send_to(peer_id ,payload)
-                    self.logger.info("Message sent to peer")
+                    msg_args = parts[1].strip().split()[1:]
+                    msg_args=" ".join(msg_args)                 # first word after "message"    # ALL remaining words, with spaces preserved
+                    payload = {"type": "CHAT", "text": msg_args}
+                    
+                    await self.messaging.send_to(peer_id, payload)
+                    self.logger.info(f"Message sent to {peer_id}: {msg_args}")
 
                 elif cmd == "setleader" and len(parts) > 1:
                     self.leader_id = parts[1]

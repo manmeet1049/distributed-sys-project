@@ -185,12 +185,23 @@ class DiscoveryService:
 
     async def _listen_for_peers(self):
         """Listen for HELLO messages from other nodes via multicast."""
+        import struct
         loop = asyncio.get_event_loop()
 
         while self.running:
             try:
                 try:
                     data, addr = self.mcast_socket.recvfrom(4096)
+
+                    if len(data) >= 4:
+                        try:
+                            length = struct.unpack("!I", data[:4])[0]
+                            # If it looks exactly like our framed message → ignore it here
+                            if 0 < length <= len(data) - 4:
+                                # This is a chat/multicast message → skip discovery processing
+                                continue
+                        except struct.error:
+                            pass  # not a valid length prefix → probably a real HELLO
 
                     try:
                         message = json.loads(data.decode('utf-8'))
@@ -245,6 +256,8 @@ class DiscoveryService:
 
             # Add to node's peers
             self.node.peers[peer_id] = (peer_host, peer_port)
+            if peer_id not in self.node.vector_clock:
+                self.node.vector_clock[peer_id] = 0
 
             # Trigger callback if set
             if self.on_peer_discovered:
