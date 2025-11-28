@@ -7,9 +7,10 @@ class Message:
     """
     __slots__ = ("msg_id", "sender_id", "vector_clock", "payload", "type")
 
-    def __init__(self, *, msg_id: str, sender_id: str, 
+    def __init__(self, msg_id: str, sender_id: str, 
+                 payload: dict,
                  vector_clock: Optional[Dict[str,int]] = None,
-                 payload: dict, type: str = "APP"):
+                 type: str = "APP"):
         self.msg_id    = msg_id      # unique per message (UUID)
         self.sender_id = sender_id   # node that created the message
         self.vector_clock      = vector_clock         # per-sender monotonic counter
@@ -29,8 +30,8 @@ class Message:
         return cls(
             msg_id    = data["msg_id"],
             sender_id = data["sender_id"],
-            seq       = data["vector_clock"],
-            payload   = data["payload"],
+            vector_clock       = data.get("vector_clock"),
+            payload   = data.get('payload'),
             type      = data.get("type", "APP"),
         )
-    from_dict = classmethod(from_dict)
+    # from_dict = classmethod(from_dict)

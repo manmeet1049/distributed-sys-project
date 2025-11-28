@@ -151,13 +151,16 @@ class MessagingService:
         if msg.type == "NACK":
             await self.if_negative_ack_received(sender_id, msg.payload.get("original", ""))
             return
-        print(f"Handling incoming message from {sender_id}: {msg.to_dict()}")
-        # Normal application message – give the *Message* object to the user
-        #pass to causal buffer
+        display_sender = sender_id if sender_id is not None else msg.sender_id
+        # This line will now ALWAYS print
+        print(f"Handling incoming message from {display_sender}: {msg.payload.get('text', msg.payload)}")
+
+        # Deliver through causal buffer (this already works)
         if self.on_message_received:
             await self.on_message_received(msg)
         else:
-            self.node.logger.info(f"← {sender_id} [{msg.seq}] : {msg.payload}")
+            # fallback (only if you still have the old on_message_received = None case)
+            self.node.logger.info(f"← {display_sender} : {msg.payload.get('text', msg.payload)}")
 
     # ------------------------------------------------------------------
     # Public API

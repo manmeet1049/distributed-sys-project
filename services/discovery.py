@@ -11,6 +11,7 @@ import logging
 import socket
 import netifaces
 from typing import Callable, Optional
+from Data.message import Message
 
 
 class DiscoveryService:
@@ -192,26 +193,53 @@ class DiscoveryService:
             try:
                 try:
                     data, addr = self.mcast_socket.recvfrom(4096)
-
+                    # IMMEDIATE DEBUG — THIS WILL TELL US EVERYTHING
+                    # print(f"RAW PACKET: len={len(data)}  first_8_bytes={data[:8].hex()}  from={addr}")
+                    # ────── CASE 1: Framed application message (our chat/multicast) ──────
                     if len(data) >= 4:
                         try:
                             length = struct.unpack("!I", data[:4])[0]
-                            # If it looks exactly like our framed message → ignore it here
-                            if 0 < length <= len(data) - 4:
-                                # This is a chat/multicast message → skip discovery processing
-                                continue
-                        except struct.error:
-                            pass  # not a valid length prefix → probably a real HELLO
+                            if len(data) == 4 + length:
+                                print(f"FRAMED MESSAGE DETECTED! payload_len={length}")
+                                # This is a chat message → forward to MessagingService
+                                if self.node.messaging:
+                                    print("inside messaging")
+                                    try:
+                                        msg_dict = json.loads(data[4:].decode('utf-8'))
+                                        print(msg_dict)
+                                        # THIS IS WHERE IT WAS CRASHING — NOW WITH FULL ERROR PRINT
+                                        try:
+                                            msg = Message.from_dict(msg_dict)
+                                            print("Message.from_dict() SUCCESS!")
+                                            print(f"   → sender_id: {msg.sender_id}")
+                                            print(f"   → payload text: {msg.payload.get('text', '[no text]')}")
+                                            print(f"   → vector_clock: {msg.vector_clock}")
 
+                                        except Exception as e:
+                                            print("Message.from_dict() FAILED WITH ERROR:")
+                                            print(f"   ERROR TYPE: {type(e).__name__}")
+                                            print(f"   ERROR MESSAGE: {e}")
+                                            print(f"   FULL DICT THAT CAUSED CRASH: {msg_dict}")
+                                            import traceback
+                                            traceback.print_exc()  # prints the full stack trace
+                                            print("Falling back to manual Message creation...")
+                                        # msg = Message.from_dict(msg_dict)
+                                        print(f"Discovered framed message from {addr}: {msg.payload.get('text', msg.payload)}")
+                                        # Fake the addr as (sender_ip, sender_port) — best effort
+                                        await self.node.messaging._handle_incoming(None, addr, msg)
+                                    except Exception as e:
+                                        self.logger.debug(f"Failed to handle framed msg: {e}")
+                                continue  # skip further processing
+                        except struct.error:
+                            pass  # not a valid length prefix → fall through to HELLO check
+
+                    # ────── CASE 2: Raw HELLO discovery message ──────
                     try:
                         message = json.loads(data.decode('utf-8'))
-
-                        # Only process HELLO messages from other nodes
                         if message.get("type") == "HELLO" and message.get("node_id") != self.node.id:
                             await self._handle_peer_discovery(message, addr)
-                    except json.JSONDecodeError:
-                        self.logger.warning(
-                            f"Invalid JSON message from {addr}")
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        pass  # ignore garbage
                             
 
                 except BlockingIOError:
