@@ -4,18 +4,54 @@ import socket
 import sys
 import netifaces
 from typing import Optional
+import os
+import uuid
 
 
 from services.discovery import DiscoveryService
 from services.messaging_service import MessagingService
+from services.ring_service import RingService
 from Data.message import Message
 
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+def setup_node_logging(node_id: str, level=logging.INFO) -> str:
+    """
+    Configure logging for a specific node.
+    Creates a log file per node and minimizes console output.
+    """
+    # Create logs directory if it doesn't exist
+    log_dir = "logs"
+    os.makedirs(log_dir, exist_ok=True)
+
+    # Create log file for this node
+    log_file = os.path.join(log_dir, f"{node_id}.log")
+
+    # Configure file handler for detailed logs
+    file_handler = logging.FileHandler(log_file, mode='w')
+    file_handler.setLevel(level)
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    ))
+
+    # Configure console handler for minimal output (WARNING and above only)
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.WARNING)
+    console_handler.setFormatter(logging.Formatter(
+        '%(levelname)s - %(message)s'
+    ))
+
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+
+    # Remove any existing handlers
+    root_logger.handlers.clear()
+
+    # Add our handlers
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+
+    return log_file
 
 
 class Node:
@@ -24,23 +60,36 @@ class Node:
     Each node operates as both a client and server in the P2P network.
     """
 
-    def __init__(self, node_id: str, host: str, port: int):
+    def __init__(self, node_id: str, host: str, port: int, generate_uuid: bool = True):
         """
         Initialize a node.
 
         Args:
-            node_id: Unique identifier for this node
+            node_id: Human-readable identifier for this node (e.g., "Node-5000")
             host: IP address to bind to
             port: Port number to listen on
+            generate_uuid: If True, generate a UUID for election; if False, use node_id
         """
-        self.id = node_id
+        # Generate UUID for election purposes
+        if generate_uuid:
+            self.uuid = str(uuid.uuid4())
+            self.name = node_id  # Human-readable name
+            self.id = self.uuid  # Use UUID as the actual ID for all operations
+        else:
+            self.uuid = node_id
+            self.name = node_id
+            self.id = node_id
+
+        # Setup logging with human-readable name
+        self.log_file = setup_node_logging(self.name)
+
         self.host = host
         self.port = port
         self.addr = (host, port)            # Tuple for socket binding
-        self.vector_clock = {self.id: 0}    # Initialize vector clock
+        self.vector_clock = {self.id: 0}    # Initialize vector clock with UUID
         self.is_leader = False              # Flag to indicate if this node is the leader
         self.leader_id: Optional[str] = None
-        self.logger = logging.getLogger(f"Node-{node_id}")
+        self.logger = logging.getLogger(f"Node-{self.name}")
 
         # Network communication
         self.server_socket: Optional[socket.socket] = None
@@ -52,20 +101,26 @@ class Node:
         # Discovery service (now uses multicast only)
         self.discovery_service = DiscoveryService(self)
 
-        #Messaging service
+        # Messaging service
         self.messaging = MessagingService(self)
-        # ------------------------------------------------------------------
-        # NEW: Simple receive handler (no causal ordering)
-        # ------------------------------------------------------------------
-        # async def on_message(msg: Message):
-        #     print(f"\n[RECEIVED] {msg.sender_id} #{msg.seq}: {msg.payload}")
 
-        # self.messaging.on_message_received = on_message
-
-        self.logger.info(f"Node initialized: {self.id} at {self.host}:{self.port}")
+        # Ring service
+        self.ring_service = RingService(self)
 
         self.logger.info(
-            f"Node initialized: {self.id} at {self.host}:{self.port}")
+            f"Node initialized: {self.name} (UUID: {self.uuid}) at {self.host}:{self.port}")
+        self.logger.info(f"Logging to: {self.log_file}")
+
+        # Print to console so user knows where to find logs
+        print(f"\n{'='*60}")
+        print(f"Node {self.name} initialized")
+        print(f"UUID: {self.uuid}")
+        print(f"Listening on: {self.host}:{self.port}")
+        print(f"Logs written to: {self.log_file}")
+        print(f"{'='*60}\n")
+        print(f"Listening on: {self.host}:{self.port}")
+        print(f"Logs written to: {self.log_file}")
+        print(f"{'='*60}\n")
 
     async def start(self):
         """Start the node: bind socket and begin accepting connections."""
@@ -89,6 +144,7 @@ class Node:
             await asyncio.gather(
                 self.discovery_service.start(),
                 self.messaging.start(),
+                self.ring_service.start(),
                 self._accept_connections(),
                 self._handle_input(),
             )
@@ -165,7 +221,7 @@ class Node:
         while self.running:
             try:
                 # Read input in a non-blocking way
-                user_input = await loop.run_in_executor(None, input, f"[{self.id}]> ")
+                user_input = await loop.run_in_executor(None, input, f"[{self.name}]> ")
                 parts = user_input.strip().split(maxsplit=1)
                 cmd = parts[0].lower() if parts else ""
 
@@ -187,9 +243,10 @@ class Node:
                     print(parts)
                     peer_id = parts[1].split()[0]
                     msg_args = parts[1].strip().split()[1:]
-                    msg_args=" ".join(msg_args)                 # first word after "message"    # ALL remaining words, with spaces preserved
+                    # first word after "message"    # ALL remaining words, with spaces preserved
+                    msg_args = " ".join(msg_args)
                     payload = {"type": "CHAT", "text": msg_args}
-                    
+
                     await self.messaging.send_to(peer_id, payload)
                     self.logger.info(f"Message sent to {peer_id}: {msg_args}")
 
@@ -197,6 +254,27 @@ class Node:
                     self.leader_id = parts[1]
                     self.is_leader = (parts[1] == self.id)
                     self.logger.info(f"Leader set to {self.leader_id}")
+                elif cmd == "ring":
+                    # Display ring topology information
+                    ring_info = self.ring_service.get_ring_info()
+                    print("\n=== Ring Topology ===")
+                    print(f"Node: {self.name}")
+                    # Show first 8 chars of UUID
+                    print(f"UUID: {self.uuid[:8]}...")
+                    print(
+                        f"Predecessor: {ring_info['predecessor'][:8] if ring_info['predecessor'] else 'None'}...")
+                    print(
+                        f"Successor: {ring_info['successor'][:8] if ring_info['successor'] else 'None'}...")
+                    print(f"Ring Established: {ring_info['ring_established']}")
+                    print(f"In Ring: {ring_info['in_ring']}")
+                    print("====================\n")
+                elif cmd == "uuid":
+                    # Display full UUID information
+                    print(f"\n=== Node Identity ===")
+                    print(f"Name: {self.name}")
+                    print(f"Full UUID: {self.uuid}")
+                    print(f"Host:Port: {self.host}:{self.port}")
+                    print("=====================\n")
                 elif user_input.startswith("connect"):
                     # Format: connect <host> <port> <peer_id>
                     parts = user_input.split()
@@ -206,7 +284,13 @@ class Node:
                         self.logger.warning(
                             "Usage: connect <host> <port> <peer_id>")
                 else:
-                    self.logger.info("Commands: peers | multicast <msg> | leader <msg> | setleader <id> | exit | connect | transmission")
+                    print("Commands:")
+                    print("  peers          - Show discovered peers")
+                    print("  ring           - Show ring topology (short UUIDs)")
+                    print("  uuid           - Show full UUID and node info")
+                    print("  multicast <msg>- Broadcast message to all peers")
+                    print("  message <id> <msg> - Send message to specific peer")
+                    print("  exit           - Shutdown node")
 
             except EOFError:
                 await self.shutdown()
