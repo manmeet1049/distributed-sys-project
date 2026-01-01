@@ -68,8 +68,10 @@ class RingService:
         if hasattr(self.messaging, '_peer_discovered'):
             self.messaging._peer_discovered(peer_id, host, port)
 
-        # If we're not in a ring yet, try to join through this peer
-        if not self.ring_established and peer_id != self.node.id:
+        # If we're not in a ring yet and not currently trying to join, try to join through this peer
+        # Only attempt one join at a time
+        if not self.ring_established and peer_id != self.node.uuid and not hasattr(self, '_joining'):
+            self._joining = True
             await self._attempt_join(peer_id)
 
     async def _on_peer_lost(self, peer_id: str):
@@ -77,6 +79,13 @@ class RingService:
         # First call the messaging service's peer lost handler
         if hasattr(self.messaging, '_peer_lost'):
             self.messaging._peer_lost(peer_id)
+
+        # Check if the lost peer was the leader
+        if hasattr(self.node, 'leader_election') and self.node.leader_election:
+            if peer_id == self.node.leader_id:
+                self.logger.warning(f"Leader {peer_id[:8]}... has left the ring!")
+                # Notify leader election service
+                asyncio.create_task(self.node.leader_election._handle_leader_failure())
 
         # Handle ring topology changes
         if peer_id == self.successor_id:
@@ -86,8 +95,8 @@ class RingService:
 
         if peer_id == self.predecessor_id:
             self.logger.warning(
-                f"Predecessor {peer_id} lost, clearing predecessor")
-            self.predecessor_id = None
+                f"Predecessor {peer_id} lost, finding new predecessor")
+            await self._fix_predecessor()
 
     # ------------------------------------------------------------------
     # Ring join protocol
@@ -95,6 +104,8 @@ class RingService:
     async def _attempt_join(self, bootstrap_peer_id: str):
         """Attempt to join the ring through a bootstrap peer."""
         if self.ring_established:
+            if hasattr(self, '_joining'):
+                delattr(self, '_joining')
             return
 
         self.logger.info(f"Attempting to join ring via {bootstrap_peer_id}")
@@ -116,6 +127,9 @@ class RingService:
         except Exception as e:
             self.logger.error(
                 f"Failed to send JOIN_REQUEST to {bootstrap_peer_id}: {e}")
+            # Clear joining flag on failure so we can try with another peer
+            if hasattr(self, '_joining'):
+                delattr(self, '_joining')
 
     async def handle_join_request(self, requester_id: str, msg: Message):
         """Handle a JOIN_REQUEST from a new node wanting to join the ring."""
@@ -131,6 +145,13 @@ class RingService:
                 f"Timeout waiting for {requester_id} in peers table")
             return
 
+        # Check if requester is already in the ring (prevent duplicate insertion)
+        if requester_id == self.successor_id or requester_id == self.predecessor_id:
+            self.logger.warning(
+                f"Ignoring JOIN_REQUEST from {requester_id} - already in ring"
+            )
+            return
+
         # If I'm alone (no ring yet), create a ring of two
         if self.successor_id is None:
             self.successor_id = requester_id
@@ -138,12 +159,15 @@ class RingService:
             self.ring_established = True
 
             # Tell requester: you point to me in both directions
+            # Also share current leader information (if any)
             response = Message(
                 msg_id=str(uuid.uuid4()),
                 sender_id=self.node.id,
                 payload={
                     "your_successor": self.node.id,
-                    "your_predecessor": self.node.id
+                    "your_predecessor": self.node.id,
+                    "current_leader": self.node.leader_id,
+                    "leader_exists": self.node.leader_id is not None
                 },
                 type="JOIN_RESPONSE"
             )
@@ -157,13 +181,15 @@ class RingService:
         old_successor = self.successor_id
         self.successor_id = requester_id
 
-        # Tell requester its position
+        # Tell requester its position and share current leader information
         response = Message(
             msg_id=str(uuid.uuid4()),
             sender_id=self.node.id,
             payload={
                 "your_successor": old_successor,
-                "your_predecessor": self.node.id
+                "your_predecessor": self.node.id,
+                "current_leader": self.node.leader_id,
+                "leader_exists": self.node.leader_id is not None
             },
             type="JOIN_RESPONSE"
         )
@@ -192,6 +218,34 @@ class RingService:
         self.successor_id = payload["your_successor"]
         self.predecessor_id = payload["your_predecessor"]
         self.ring_established = True
+        
+        # Clear joining flag
+        if hasattr(self, '_joining'):
+            delattr(self, '_joining')
+
+        # Accept leader information from bootstrap node (Active Propagation)
+        current_leader = payload.get("current_leader")
+        leader_exists = payload.get("leader_exists", False)
+        
+        if leader_exists and current_leader:
+            self.logger.info(
+                f"Learned existing leader from bootstrap: {current_leader[:8]}..."
+            )
+            # Update node's leader information
+            self.node.leader_id = current_leader
+            self.node.is_leader = (current_leader == self.node.uuid)
+            
+            # Update leader election service if available
+            if hasattr(self.node, 'leader_election') and self.node.leader_election:
+                self.node.leader_election.leader_id = current_leader
+                self.node.leader_election.is_leader = (current_leader == self.node.uuid)
+                # Don't start an election since we know the leader
+                self.node.leader_election.election_in_progress = False
+                self.node.leader_election.is_participating = False
+        else:
+            self.logger.info(
+                "No existing leader reported - may need to start election"
+            )
 
         self.logger.info(
             f"Joined ring: predecessor={self.predecessor_id}, successor={self.successor_id}"
@@ -348,6 +402,9 @@ class RingService:
 
     async def _fix_successor(self):
         """Find a new successor when current one fails."""
+        self.logger.info(f"Attempting to fix successor. Available peers: {list(self.messaging.peers.keys())}")
+        self.logger.info(f"Current successor_id: {self.successor_id}")
+        
         if not self.messaging.peers:
             # We're alone
             self.successor_id = None
@@ -360,18 +417,57 @@ class RingService:
         # In a production system, we'd ask the failed successor's successor
         # For now, pick any peer that's not us
         for peer_id in self.messaging.peers:
-            if peer_id != self.node.id and peer_id != self.successor_id:
+            self.logger.debug(f"Checking peer {peer_id[:8]}... (self_uuid={self.node.uuid[:8]}, old_successor={self.successor_id[:8] if self.successor_id else 'None'})")
+            # Compare UUIDs, not short IDs!
+            if peer_id != self.node.uuid and peer_id != self.successor_id:
                 old_successor = self.successor_id
                 self.successor_id = peer_id
                 self.logger.info(
-                    f"Fixed successor: {old_successor} -> {peer_id}")
+                    f"Fixed successor: {old_successor[:8] if old_successor else 'None'}... -> {peer_id[:8]}...")
 
                 # Notify new successor
                 await self._notify_successor()
                 return
 
         # If we only have one peer (the failed one), wait for discovery
-        self.logger.warning("Could not find replacement successor")
+        self.logger.warning(f"Could not find replacement successor among {len(self.messaging.peers)} peers")
+
+    async def _fix_predecessor(self):
+        """Find a new predecessor when current one fails."""
+        self.logger.info(f"Attempting to fix predecessor. Available peers: {list(self.messaging.peers.keys())}")
+        self.logger.info(f"Current predecessor_id: {self.predecessor_id}")
+        
+        if not self.messaging.peers:
+            # We're alone
+            self.successor_id = None
+            self.predecessor_id = None
+            self.ring_established = False
+            self.logger.info("No peers available, leaving ring")
+            return
+
+        # Find any available peer as new predecessor
+        # For now, pick any peer that's not us and not our current successor
+        for peer_id in self.messaging.peers:
+            self.logger.debug(f"Checking peer {peer_id[:8]}... for predecessor (self_uuid={self.node.uuid[:8]}, successor={self.successor_id[:8] if self.successor_id else 'None'})")
+            # Compare UUIDs, not short IDs!
+            # Don't pick ourselves or our successor as predecessor
+            if peer_id != self.node.uuid and peer_id != self.predecessor_id and peer_id != self.successor_id:
+                old_predecessor = self.predecessor_id
+                self.predecessor_id = peer_id
+                self.logger.info(
+                    f"Fixed predecessor: {old_predecessor[:8] if old_predecessor else 'None'}... -> {peer_id[:8]}...")
+                return
+
+        # If we can't find anyone else, our successor becomes our predecessor (2-node ring)
+        if self.successor_id and self.successor_id != self.predecessor_id:
+            old_predecessor = self.predecessor_id
+            self.predecessor_id = self.successor_id
+            self.logger.info(
+                f"Using successor as predecessor (2-node ring): {old_predecessor[:8] if old_predecessor else 'None'}... -> {self.successor_id[:8]}...")
+            return
+        
+        # If we only have one peer (the failed one), wait for discovery
+        self.logger.warning(f"Could not find replacement predecessor among {len(self.messaging.peers)} peers")
 
     # ------------------------------------------------------------------
     # Utility methods

@@ -11,6 +11,7 @@ import uuid
 from services.discovery import DiscoveryService
 from services.messaging_service import MessagingService
 from services.ring_service import RingService
+from services.leader_election import LeaderElectionService
 from Data.message import Message
 
 
@@ -107,6 +108,9 @@ class Node:
         # Ring service
         self.ring_service = RingService(self)
 
+        # Leader election service (HS algorithm)
+        self.leader_election = LeaderElectionService(self)
+
         self.logger.info(
             f"Node initialized: {self.name} (UUID: {self.uuid}) at {self.host}:{self.port}")
         self.logger.info(f"Logging to: {self.log_file}")
@@ -145,6 +149,7 @@ class Node:
                 self.discovery_service.start(),
                 self.messaging.start(),
                 self.ring_service.start(),
+                self.leader_election.start(),
                 self._accept_connections(),
                 self._handle_input(),
             )
@@ -275,6 +280,21 @@ class Node:
                     print(f"Full UUID: {self.uuid}")
                     print(f"Host:Port: {self.host}:{self.port}")
                     print("=====================\n")
+                elif cmd == "elect":
+                    # Start leader election
+                    print("Starting leader election using HS algorithm...")
+                    await self.leader_election.start_election()
+                elif cmd == "leader":
+                    # Show leader information
+                    leader_info = self.leader_election.get_leader_info()
+                    print(f"\n=== Leader Information ===")
+                    print(f"Status: {self.leader_election.get_status()}")
+                    if leader_info['leader_id']:
+                        print(f"Leader UUID: {leader_info['leader_id'][:8]}...")
+                        print(f"I am leader: {leader_info['is_leader']}")
+                    if leader_info['election_in_progress']:
+                        print(f"Election in progress: Phase {leader_info['current_phase']}")
+                    print("==========================\n")
                 elif user_input.startswith("connect"):
                     # Format: connect <host> <port> <peer_id>
                     parts = user_input.split()
@@ -288,6 +308,8 @@ class Node:
                     print("  peers          - Show discovered peers")
                     print("  ring           - Show ring topology (short UUIDs)")
                     print("  uuid           - Show full UUID and node info")
+                    print("  elect          - Start leader election (HS algorithm)")
+                    print("  leader         - Show current leader information")
                     print("  multicast <msg>- Broadcast message to all peers")
                     print("  message <id> <msg> - Send message to specific peer")
                     print("  exit           - Shutdown node")

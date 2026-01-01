@@ -175,6 +175,21 @@ class MessagingService:
                 await self.node.ring_service.handle_notify(msg)
                 return
         
+        # Handle leader election messages
+        if hasattr(self.node, 'leader_election') and self.node.leader_election:
+            if msg.type == "ELECTION":
+                await self.node.leader_election.handle_election_message(msg)
+                return
+            elif msg.type == "ELECTION_REPLY":
+                await self.node.leader_election.handle_election_reply(msg)
+                return
+            elif msg.type == "LEADER_ANNOUNCEMENT":
+                await self.node.leader_election.handle_leader_announcement(msg)
+                return
+            elif msg.type == "LEADER_HEARTBEAT":
+                await self.node.leader_election.handle_leader_heartbeat(msg)
+                return
+        
         # Handle NACK messages
         if msg.type == "NACK":
             await self.if_negative_ack_received(sender_id, msg.payload.get("original", ""))
