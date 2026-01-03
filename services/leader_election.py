@@ -152,9 +152,24 @@ class LeaderElectionService:
         - Automatically when ring is established
         - After detecting leader failure
         """
-        # Check if we're in a ring
+        # Special case: If we're not in a ring, check if we should become leader
         if not self.ring_service.is_in_ring():
-            self.logger.warning("Cannot start election: not in a ring")
+            # If ring service cleared the ring (set ring_established = False),
+            # it means it couldn't find any valid neighbors.
+            # We should declare ourselves leader since we're effectively alone.
+            self.logger.info("Not in a ring after topology change - declaring self as leader")
+            self.leader_id = self.node.uuid
+            self.is_leader = True
+            self.node.leader_id = self.node.uuid
+            self.node.is_leader = True
+            self.election_in_progress = False
+            self.is_participating = False
+            self.logger.info(f"🎉 I am the leader! (UUID: {self.node.uuid[:8]}...)")
+            return
+        
+        # Check if ring is stable before starting election
+        if not self.ring_service.is_ring_stable():
+            self.logger.warning("Cannot start election: ring is not stable (topology still changing)")
             return
         
         # Check if election already in progress
@@ -164,6 +179,19 @@ class LeaderElectionService:
         
         # Validate ring neighbors are alive, fix if needed
         await self._validate_ring_neighbors()
+        
+        # Re-check if we're still in a ring after validation
+        # (validation might have discovered we're actually alone)
+        if not self.ring_service.is_in_ring():
+            self.logger.info("Not in a ring after validation - declaring self as leader")
+            self.leader_id = self.node.uuid
+            self.is_leader = True
+            self.node.leader_id = self.node.uuid
+            self.node.is_leader = True
+            self.election_in_progress = False
+            self.is_participating = False
+            self.logger.info(f"🎉 I am the leader! (UUID: {self.node.uuid[:8]}...)")
+            return
         
         self.logger.info(f"Starting HS election (Node UUID: {self.node.uuid})")
         self.election_in_progress = True
@@ -797,6 +825,19 @@ class LeaderElectionService:
                 f"Leader {self.leader_id[:8]}... appears to be dead "
                 f"(no heartbeat for {time_since_heartbeat:.1f}s)"
             )
+            # Mark topology as changed BEFORE triggering failure handler
+            # This ensures the ring is seen as unstable even if discovery hasn't detected the loss yet
+            self.ring_service._mark_topology_change(f"heartbeat_timeout_leader_{self.leader_id[:8]}")
+            
+            # Manually trigger ring repair if the dead leader is in our ring neighbors
+            # Don't wait for discovery's slow timeout (30s) - fix it now!
+            if self.leader_id == self.ring_service.successor_id:
+                self.logger.info("Dead leader is our successor, triggering repair...")
+                await self.ring_service._fix_successor()
+            if self.leader_id == self.ring_service.predecessor_id:
+                self.logger.info("Dead leader is our predecessor, triggering repair...")
+                await self.ring_service._fix_predecessor()
+            
             await self._handle_leader_failure()
     
     async def _handle_leader_failure(self):
@@ -812,17 +853,33 @@ class LeaderElectionService:
         self.last_heartbeat_time = None
         
         # Wait for ring to stabilize (discovery needs time to detect peer loss and fix topology)
-        # Discovery timeout is 30s, but typically detects within 5-10s
-        self.logger.info("Waiting 5 seconds for ring to stabilize after leader failure...")
-        await asyncio.sleep(5)
+        self.logger.info("Waiting for ring to stabilize after leader failure...")
+        is_stable = await self.ring_service.wait_for_stable_ring(timeout=10.0)
         
+        if not is_stable:
+            self.logger.warning("Ring did not stabilize in time, but proceeding with election check")
+        
+        # Re-check if a leader was already elected while we were waiting
+        if self.leader_id is not None:
+            self.logger.info(f"A new leader {self.leader_id[:8]}... was already elected during wait")
+            return
+
         # Check if we're still in a ring
         if not self.ring_service.is_in_ring():
-            self.logger.warning("Not in a ring, cannot start election")
+            # Not in a ring - we're likely alone now
+            # Declare ourselves as leader instead of giving up
+            self.logger.info("Not in a ring after leader failure - declaring self as leader")
+            self.leader_id = self.node.uuid
+            self.is_leader = True
+            self.node.leader_id = self.node.uuid
+            self.node.is_leader = True
+            self.election_in_progress = False
+            self.is_participating = False
+            self.logger.info(f"🎉 I am the leader! (UUID: {self.node.uuid[:8]}...)")
             return
         
         # Start new election
-        self.logger.info(f"Starting new election after leader {old_leader[:8]}... failure")
+        self.logger.info(f"Starting new election after leader {old_leader[:8] if old_leader else 'None'}... failure")
         await self.start_election()
 
     # ------------------------------------------------------------------

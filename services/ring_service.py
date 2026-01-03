@@ -24,6 +24,10 @@ class RingService:
         self.predecessor_id: Optional[str] = None
         self.ring_established: bool = False
 
+        # Stability tracking for elections
+        self._last_topology_change = time.time()
+        self._min_stable_duration = 3.0  # Ring must be stable for 3s before election
+
         # Stabilization state
         self.stabilization_interval = 5  # seconds
         self.ping_timeout = 2  # seconds
@@ -76,6 +80,10 @@ class RingService:
 
     async def _on_peer_lost(self, peer_id: str):
         """Called when a peer times out."""
+        # CRITICAL: Mark topology change IMMEDIATELY when ANY peer is lost
+        # This must happen BEFORE triggering leader failure handler
+        self._mark_topology_change(f"peer_lost_{peer_id[:8]}")
+        
         # First call the messaging service's peer lost handler
         if hasattr(self.messaging, '_peer_lost'):
             self.messaging._peer_lost(peer_id)
@@ -84,7 +92,7 @@ class RingService:
         if hasattr(self.node, 'leader_election') and self.node.leader_election:
             if peer_id == self.node.leader_id:
                 self.logger.warning(f"Leader {peer_id[:8]}... has left the ring!")
-                # Notify leader election service
+                # Notify leader election service (it will wait for ring stability)
                 asyncio.create_task(self.node.leader_election._handle_leader_failure())
 
         # Handle ring topology changes
@@ -429,8 +437,13 @@ class RingService:
                 await self._notify_successor()
                 return
 
-        # If we only have one peer (the failed one), wait for discovery
+        # If we only have one peer (the failed one), or no valid replacement found
+        # Clear the ring state since we're effectively alone
         self.logger.warning(f"Could not find replacement successor among {len(self.messaging.peers)} peers")
+        self.successor_id = None
+        self.predecessor_id = None
+        self.ring_established = False
+        self.logger.info("No valid successor found - leaving ring")
 
     async def _fix_predecessor(self):
         """Find a new predecessor when current one fails."""
@@ -466,8 +479,63 @@ class RingService:
                 f"Using successor as predecessor (2-node ring): {old_predecessor[:8] if old_predecessor else 'None'}... -> {self.successor_id[:8]}...")
             return
         
-        # If we only have one peer (the failed one), wait for discovery
+        # If we only have one peer (the failed one), or no valid replacement found
+        # Clear the ring state since we're effectively alone
         self.logger.warning(f"Could not find replacement predecessor among {len(self.messaging.peers)} peers")
+        self.successor_id = None
+        self.predecessor_id = None
+        self.ring_established = False
+        self.logger.info("No valid predecessor found - leaving ring")
+
+    # ------------------------------------------------------------------
+    # Stability tracking for elections
+    # ------------------------------------------------------------------
+    def _mark_topology_change(self, reason: str = "unknown"):
+        """Mark that the ring topology has changed."""
+        self._last_topology_change = time.time()
+        self.logger.info(f"Ring topology changed: {reason}")
+
+    def is_ring_stable(self) -> bool:
+        """
+        Check if the ring has been stable (no topology changes) for the minimum duration.
+        Used by LeaderElectionService to gate elections.
+        """
+        if not self.ring_established or not self.successor_id or not self.predecessor_id:
+            return False
+        
+        # Verify neighbors are actually alive in peers table
+        if self.successor_id not in self.messaging.peers:
+            return False
+        if self.predecessor_id not in self.messaging.peers:
+            return False
+            
+        elapsed = time.time() - self._last_topology_change
+        is_stable = elapsed >= self._min_stable_duration
+        
+        if not is_stable:
+            self.logger.debug(f"Ring not stable yet: {elapsed:.1f}s < {self._min_stable_duration}s")
+        
+        return is_stable
+
+    async def wait_for_stable_ring(self, timeout: float = 10.0) -> bool:
+        """
+        Wait for the ring to become stable.
+        
+        Args:
+            timeout: Maximum time to wait in seconds
+            
+        Returns:
+            bool: True if ring became stable, False if timeout reached
+        """
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if self.is_ring_stable():
+                self.logger.info(f"Ring stabilized after {time.time() - start_time:.1f}s")
+                return True
+            await asyncio.sleep(0.5)
+        
+        self.logger.warning(f"Ring did not stabilize within {timeout}s timeout")
+        return False
 
     # ------------------------------------------------------------------
     # Utility methods
