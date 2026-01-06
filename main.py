@@ -134,8 +134,11 @@ class Node:
                 socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(
                 socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.server_socket.setsockopt(
-                socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            try: 
+                self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            except AttributeError:
+                pass  # Not all systems support SO_REUSEPORT   
+             
             self.server_socket.bind(self.addr)
             self.server_socket.listen(5)
             self.server_socket.setblocking(False)
@@ -376,7 +379,6 @@ def main():
     port = int(sys.argv[2])
     iface = netifaces.gateways()['default'][netifaces.AF_INET][1]
     host = netifaces.ifaddresses(iface)[netifaces.AF_INET][0]['addr']
-    # host = "192.168.2.120"  # Use your local network broadcast or host IP as needed
 
     node = Node(node_id, host, port)
 

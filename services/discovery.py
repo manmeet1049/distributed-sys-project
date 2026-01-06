@@ -73,7 +73,9 @@ class DiscoveryService:
             await self.shutdown()
 
     def _setup_sockets(self):
-
+        import struct
+        import platform
+        
         def _get_local_ip(self) -> str:
             """Get the local IP address on the default route (robust across OSes)"""
             try:
@@ -97,37 +99,39 @@ class DiscoveryService:
                             continue
                         return ip
             return "127.0.0.1"
-        """Set up UDP socket for multicast send and receive."""
-        # ----- FIX FOR MACOS: Join multicast using actual interface -----
-        # Detect default interface (e.g. en0)
-        iface = netifaces.gateways()['default'][netifaces.AF_INET][1]
-        ip_addr = netifaces.ifaddresses(iface)[netifaces.AF_INET][0]['addr']
-        import struct
+
         self.mcast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         self.mcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             self.mcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         except AttributeError:
-            pass  # Not all systems support SO_REUSEPORT
-        self.mcast_socket.bind(('', self.MCAST_PORT))
-        # self.logger.info(f"bound to {ip_addr}:{self.MCAST_PORT}")
-        
-        # Join multicast group
-        intf = _get_local_ip(self)
-        # mreq = struct.pack("4s4s", socket.inet_aton(self.MCAST_GRP)+socket.inet_aton(intf))
-        self.mcast_socket.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, socket.inet_aton(self.MCAST_GRP)+socket.inet_aton(intf))
-        self.mcast_socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
-        self.mcast_socket.setsockopt(
-            socket.SOL_IP,
-            socket.IP_MULTICAST_IF,
-            socket.inet_aton(intf)
-        )
-        
-        self.mcast_socket.setblocking(False)
-        self.logger.info(
-            f"Multicast socket configured - Group: {self.MCAST_GRP}:{self.MCAST_PORT}"
-        )
+            pass  # Windows doesn't have SO_REUSEPORT
 
+        # Critical for Windows: bind to 0.0.0.0
+        self.mcast_socket.bind(("0.0.0.0", self.MCAST_PORT))
+
+        # Join multicast group - Windows uses INADDR_ANY
+        if platform.system() == "Windows":
+            mreq = struct.pack("=4sl", socket.inet_aton(self.MCAST_GRP), socket.INADDR_ANY)
+            self.mcast_socket.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+            # Optional: enable receiving own packets
+            self.mcast_socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+        else:
+            # Linux/macOS: use a local IP if you want (optional, but safer) 
+            intf = _get_local_ip(self)
+            self.mcast_socket.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, socket.inet_aton(self.MCAST_GRP)+socket.inet_aton(intf))
+            # Optional: enable receiving own packets
+            self.mcast_socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+            self.mcast_socket.setsockopt(
+                socket.SOL_IP,
+                socket.IP_MULTICAST_IF,
+                socket.inet_aton(intf)
+            )
+
+
+        self.mcast_socket.setblocking(False)
+        self.logger.info(f"Multicast socket configured - Group: {self.MCAST_GRP}:{self.MCAST_PORT}")
+        
     async def _send_hello_broadcast(self):
         """Send an immediate HELLO multicast (called at startup)."""
         try:

@@ -104,3 +104,4 @@ target/
 # lock files or runtime state you don't want committed (adjust as needed)
 *.pid
 *.seed
+tests/test_nack_retransmission_unit.py

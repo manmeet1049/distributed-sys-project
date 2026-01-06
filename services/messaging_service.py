@@ -5,7 +5,7 @@ import struct
 import netifaces
 import uuid
 import logging
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from typing import Dict, Optional, Tuple, Callable, Any
 from Data.message import Message
 from services.causal_buffer import CausalBuffer
@@ -46,7 +46,9 @@ class MessagingService:
         self.node.discovery_service.on_peer_lost       = self._peer_lost
 
         # Causal buffer
-        self.causal_buffer = VectorCausalBuffer(node)
+        self.causal_buffer = VectorCausalBuffer(node, on_causal_gap = self.send_nack)  ## callback on causal gap detected
+        self.sent_history: OrderedDict[Tuple[str, int], Message] = OrderedDict()  ## (sender_id, seq) -> Message // store sent messages for potential retransmission
+        self.max_history = 100  ## max number of messages to keep in history for retransmission
 
         # Final handler (your app logic)
         async def final_handler(msg: Message):
@@ -216,7 +218,12 @@ class MessagingService:
         msg = self._build_message(payload)
         framed = self._frame(msg.to_dict())
         await self._send_raw(self.peers[peer_id], framed)
-    
+        
+        # STORE IN HISTORY
+        key = (self.node.id, self.node.vector_clock[self.node.id])
+        self.sent_history[key] = msg
+        self._prune_history()
+        
     async def send_message_direct(self, peer_id: str, message_dict: dict):
         """
         Send a pre-built message dictionary directly without wrapping.
@@ -256,27 +263,91 @@ class MessagingService:
                 framed,
                 (self.node.discovery_service.MCAST_GRP, self.node.discovery_service.MCAST_PORT)
             )
+            
+             # STORE IN HISTORY
+            key = (self.node.id, self.node.vector_clock[self.node.id])
+            self.sent_history[key] = msg
+            self._prune_history()
             self.logger.info(f"Multicast sent to {self.node.discovery_service.MCAST_GRP}:{self.node.discovery_service.MCAST_PORT}")
         except Exception as e:
             self.logger.error(f"Failed to send multicast: {e}")
 
     # ------------------------------------------------------------------
+    # Helper: prunest sent history to limit size
+    # ------------------------------------------------------------------ 
+    def _prune_history(self):
+        while len(self.sent_history) > self.max_history:
+            self.sent_history.popitem(last=False)  # remove oldest
+            
+    # ------------------------------------------------------------------
     # Helper: build a Message with a fresh seq counter
     # ------------------------------------------------------------------
     def _build_message(self, payload: dict, type: str = "APP") -> Message:
         self.node.vector_clock[self.node.id] = self.node.vector_clock.get(self.node.id, 0) + 1
-        return Message(
+        message = Message(
             msg_id    = str(uuid.uuid4()),
             sender_id = self.node.id,
             vector_clock = self.node.vector_clock.copy(),
             payload   = payload,
-            type      = type,
+            type      = type
         )
+        sent_history = (self.node.id, message.vector_clock[self.node.id])
+        self.history[sent_history] = message
+        return message
 
     # ------------------------------------------------------------------
-    # NACK hook (you can expand with retransmission logic)
+    # NACK hook
+    # ------------------------------------------------------------------ 
+    async def send_nack(self, peer_id:str, missing_info: dict):
+        """Send a NACK message to a specific peer."""
+        if peer_id not in self.peers:
+            self.node.logger.warning(f"Cannot send NACK to unknown peer {peer_id}")
+            return
+        nack_payload = {
+            "type": "NACK",
+            "my_vector_clock": self.node.vector_clock,
+            "reason": f"Missing message with seq {missing_info.get('expected_seq')}",
+            "original": json.dumps(missing_info)
+        }
+        msg = self._build_message(nack_payload, type="NACK")
+        framed = self._frame(msg.to_dict())
+        await self._send_raw(self.peers[peer_id], framed)
     # ------------------------------------------------------------------
-    async def if_negative_ack_received(self, peer_id: str, original_message: str):
-        self.logger.warning(f"NACK from {peer_id}: {original_message}")
+    # NACK hook
+    # ------------------------------------------------------------------
+    async def if_negative_ack_received(self, peer_id: str, nack_payload: dict):
+        self.node.logger.warning(f"NACK from {peer_id}: {nack_payload}")
+
         # Example: resend the original payload
         # await self.send_to(peer_id, json.loads(original_message))
+
+        #variables to store the vector clokck info from nack payload
+        their_vector_clock = nack_payload.get("my_vector_clock", {})
+        expected_seq = nack_payload.get("expected_seq", 0)
+        if( not their_vector_clock):
+            self.node.logger.warning(f"NACK from {peer_id} missing vector clock info.")
+            return
+        my_id = self.node.id
+
+        # Resend missing messages based on their vector clock
+        their_known_sequence = their_vector_clock.get(my_id, 0)
+        my_local_sequence = self.node.vector_clock.get(my_id, 0)
+
+        # Only resend if they are behind
+        if(their_known_sequence >= my_local_sequence):
+            self.node.logger.info(f"No messages to resend to {peer_id}.")
+            return
+        messages_to_resend = []
+        for seq in range(their_known_sequence + 1, my_local_sequence + 1):
+            key = (my_id, seq)
+            if key in self.sent_history:
+                messages_to_resend.append(self.sent_history[key])
+            else:
+                self.node.logger.warning(f"Message with seq {seq} not found in history for resend.")
+            
+        #send the messages in order, unicast to the peer who sent the nack
+        for msg in messages_to_resend:
+            #use the send_to function to resend the message
+            await self.send_to(peer_id, msg.payload)
+            # Small delay to avoid packet burst if many messages
+            await asyncio.sleep(0.001)
