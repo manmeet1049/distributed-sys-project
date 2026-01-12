@@ -164,7 +164,7 @@ class LeaderElectionService:
             self.node.is_leader = True
             self.election_in_progress = False
             self.is_participating = False
-            self.logger.info(f"🎉 I am the leader! (UUID: {self.node.uuid[:8]}...)")
+            self.logger.info(f"I am the leader! (UUID: {self.node.uuid[:8]}...)")
             return
         
         # Check if ring is stable before starting election
@@ -190,7 +190,7 @@ class LeaderElectionService:
             self.node.is_leader = True
             self.election_in_progress = False
             self.is_participating = False
-            self.logger.info(f"🎉 I am the leader! (UUID: {self.node.uuid[:8]}...)")
+            self.logger.info(f"I am the leader! (UUID: {self.node.uuid[:8]}...)")
             return
         
         self.logger.info(f"Starting HS election (Node UUID: {self.node.uuid})")
@@ -641,7 +641,7 @@ class LeaderElectionService:
         Announce that this node is the leader.
         Broadcast LEADER_ANNOUNCEMENT to all nodes in the ring.
         """
-        self.logger.info(f"🎉 I am the leader! (UUID: {self.node.uuid})")
+        self.logger.info(f"I am the leader! (UUID: {self.node.uuid})")
         self.is_leader = True
         self.leader_id = self.node.uuid
         self.node.is_leader = True
@@ -875,7 +875,7 @@ class LeaderElectionService:
             self.node.is_leader = True
             self.election_in_progress = False
             self.is_participating = False
-            self.logger.info(f"🎉 I am the leader! (UUID: {self.node.uuid[:8]}...)")
+            self.logger.info(f"I am the leader! (UUID: {self.node.uuid[:8]}...)")
             return
         
         # Start new election
