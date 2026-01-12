@@ -61,6 +61,7 @@ class MessagingService:
         # ---------- NEW: per-sender sequence counters ----------
         self._out_seq: defaultdict[str, int] = defaultdict(int)   # sender_id → next seq number
 
+        self.history = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -196,15 +197,19 @@ class MessagingService:
         if msg.type == "NACK":
             await self.if_negative_ack_received(sender_id, msg.payload.get("original", ""))
             return
+        if msg.payload.get("type") == "ALERT": # Handle ALERT messages
+            print("IMPORTANT!!!")
+            print(f"ALERT MESSAGE FROM {msg.sender_id}: {msg.payload.get('text')}")
+            return
         
         display_sender = sender_id if sender_id is not None else msg.sender_id
         self.logger.debug(f"Handling incoming message from {display_sender}: {msg.payload.get('text', msg.payload)}")
 
-        # Deliver through causal buffer (this already works)
+        # Deliver through causal buffer
         if self.on_message_received:
             await self.on_message_received(msg)
         else:
-            # fallback (only if you still have the old on_message_received = None case)
+            # fallback
             self.logger.info(f"← {display_sender} : {msg.payload.get('text', msg.payload)}")
 
     # ------------------------------------------------------------------

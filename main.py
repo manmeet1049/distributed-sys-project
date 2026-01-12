@@ -111,6 +111,8 @@ class Node:
         # Leader election service (HS algorithm)
         self.leader_election = LeaderElectionService(self)
 
+        self.cli_mode = "NORMAL"   # NORMAL | ALERT
+
         self.logger.info(
             f"Node initialized: {self.name} (UUID: {self.uuid}) at {self.host}:{self.port}")
         self.logger.info(f"Logging to: {self.log_file}")
@@ -228,12 +230,48 @@ class Node:
         loop = asyncio.get_event_loop()
         while self.running:
             try:
+                prompt = f"[{self.name} ALERT]> " if self.cli_mode == "ALERT" else f"[{self.name}]> " # Different prompt for ALERT mode
                 # Read input in a non-blocking way
-                user_input = await loop.run_in_executor(None, input, f"[{self.name}]> ")
+                user_input = await loop.run_in_executor(None, input, prompt)
                 parts = user_input.strip().split(maxsplit=1)
                 cmd = parts[0].lower() if parts else ""
 
-                if user_input.lower() == "exit":
+                #Alert mode handling
+                if self.cli_mode == "ALERT":
+                    if cmd == "exit":
+                        self.cli_mode = "NORMAL"
+                        print("Exited ALERT mode\n")
+                    elif cmd == "help":
+                        payload = {"type": "ALERT", "text": "NEED HELP! SEND BACKUP!"}
+                        await self.messaging.multicast_message(payload)
+                        print("HELP alert broadcasted")
+                    elif cmd == "critical":
+                        payload = {"type": "ALERT", "text": "HIGHEST PRIORITY! SITUATION CRITICAL! "}
+                        await self.messaging.multicast_message(payload)
+                        print("CRITICAL alert broadcasted")
+                    elif cmd == "message" and len(parts) > 1:
+                        text = parts[1].strip()
+                        if text:
+                            payload = {"type": "ALERT", "text": text}
+                            await self.messaging.multicast_message(payload)
+                            print("Alert message broadcasted")
+                        else:
+                            print("Empty alert message")
+                    elif self.cli_mode == "ALERT":
+                        if cmd == "alert":
+                            print("Already in ALERT mode")
+                        print("Alert Commands:")
+                        print("  help           - Broadcast HELP alert")
+                        print("  critical       - Broadcast CRITICAL alert")
+                        print("  peers          - Show discovered peers")
+                        print("  ring           - Show ring topology (short UUIDs)")
+                        print("  uuid           - Show full UUID and node info")
+                        print("  elect          - Start leader election (HS algorithm)")
+                        print("  leader         - Show current leader information")
+                        print("  message <msg>  - Broadcast message to all peers as alert")
+                        print("  multicast <msg>- Broadcast message to all peers as normal")
+                        print("  exit           - Exit Alert Mode")
+                elif user_input.lower() == "exit" and self.cli_mode == "NORMAL":
                     await self.shutdown()
                     break
                 elif user_input.lower() == "peers":
@@ -247,7 +285,7 @@ class Node:
                     payload = {"cmd": "LEADER", "data": parts[1]}
                     await self.messaging.send_message_to_leader(payload)
                     self.logger.info("Sent to leader")
-                elif cmd == "message" and len(parts) >= 2:
+                elif cmd == "message" and len(parts) >= 2 and self.cli_mode == "NORMAL":
                     print(parts)
                     peer_id = parts[1].split()[0]
                     msg_args = parts[1].strip().split()[1:]
@@ -306,6 +344,14 @@ class Node:
                     else:
                         self.logger.warning(
                             "Usage: connect <host> <port> <peer_id>")
+                elif cmd == "alert": # Switch to ALERT mode
+                    self.cli_mode = "ALERT"
+                    print("\nALERT MODE ACTIVATED")
+                    print("Commands:")
+                    print("  help            - Broadcast HELP alert")
+                    print("  critical        - Broadcast CRITICAL alert")
+                    print("  message <msg>   - Broadcast alert message")
+                    print("  exit            - Leave ALERT mode\n")
                 else:
                     print("Commands:")
                     print("  peers          - Show discovered peers")
@@ -315,6 +361,7 @@ class Node:
                     print("  leader         - Show current leader information")
                     print("  multicast <msg>- Broadcast message to all peers")
                     print("  message <id> <msg> - Send message to specific peer")
+                    print("  alert          - Switch to ALERT mode")
                     print("  exit           - Shutdown node")
 
             except EOFError:
