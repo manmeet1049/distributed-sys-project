@@ -318,7 +318,6 @@ class LeaderElectionService:
         payload = msg.payload
         initiator_id = payload["initiator_id"]
         initiator_name = payload.get("initiator_name", initiator_id[:8])
-        current_id = payload["current_id"]
         hop_count = payload["hop_count"]
         max_hops = payload["max_hops"]
         direction = Direction(payload["direction"])

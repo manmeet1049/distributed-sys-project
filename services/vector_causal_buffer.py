@@ -1,6 +1,4 @@
-# services/vector_causal_buffer.py
-import asyncio
-from typing import Awaitable, Dict, Callable, List, Optional
+from typing import Awaitable,  Callable, List, Optional
 from Data.message import Message
 
 class VectorCausalBuffer:
@@ -23,6 +21,8 @@ class VectorCausalBuffer:
 
     def _can_deliver(self, msg: Message) -> bool:
         sender = msg.sender_id
+        if sender == self.node.id:
+            return False
         vc = msg.vector_clock
         for node_id, count in vc.items():
             local = self.node.vector_clock.get(node_id, 0)

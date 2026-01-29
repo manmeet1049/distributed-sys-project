@@ -1,5 +1,4 @@
 from typing import Optional, Dict, Any
-import uuid
 
 class Message:
     """
@@ -34,4 +33,3 @@ class Message:
             payload   = data.get('payload'),
             type      = data.get("type", "APP"),
         )
-    # from_dict = classmethod(from_dict)

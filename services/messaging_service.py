@@ -6,9 +6,8 @@ import netifaces
 import uuid
 import logging
 from collections import defaultdict, OrderedDict
-from typing import Dict, Optional, Tuple, Callable, Any
+from typing import Dict, Optional, Tuple
 from Data.message import Message
-from services.causal_buffer import CausalBuffer
 from services.vector_causal_buffer import VectorCausalBuffer
 
 # ----------------------------------------------------------------------
@@ -84,7 +83,6 @@ class MessagingService:
             f"MessagingService listening on UDP {bind_addr}:{self.node.port}"
         )
         asyncio.create_task(self._receive_loop())
-        # asyncio.create_task(self._receive_multicast_loop())
 
     async def shutdown(self):
         if self.inbound_sock:
@@ -197,13 +195,16 @@ class MessagingService:
         if msg.type == "NACK":
             await self.if_negative_ack_received(sender_id, msg.payload.get("original", ""))
             return
-        if msg.payload.get("type") == "ALERT": # Handle ALERT messages
+        # Handle ALERT messages
+        if msg.payload.get("type") == "ALERT": 
             print("IMPORTANT!!!")
             print(f"ALERT MESSAGE FROM {msg.sender_id}: {msg.payload.get('text')}")
             return
         
         display_sender = sender_id if sender_id is not None else msg.sender_id
         self.logger.debug(f"Handling incoming message from {display_sender}: {msg.payload.get('text', msg.payload)}")
+        if msg.payload.get("type") != "ALERT": 
+            print(f"MESSAGE FROM {msg.sender_id}: {msg.payload.get('text')}")
 
         # Deliver through causal buffer
         if self.on_message_received:
@@ -243,7 +244,7 @@ class MessagingService:
     async def send_message_to_leader(self, payload: dict):
         """Convenient wrapper for leader communication."""
         if self.node.is_leader:
-            self.logger.warning("I am the leader – not sending to myself.")
+            self.logger.warning("I am the leader - not sending to myself.")
             return
         if not self.node.leader_id:
             self.logger.warning("No leader known yet.")
@@ -301,7 +302,7 @@ class MessagingService:
         return message
 
     # ------------------------------------------------------------------
-    # NACK hook
+    # NACK Send hook
     # ------------------------------------------------------------------ 
     async def send_nack(self, peer_id:str, missing_info: dict):
         """Send a NACK message to a specific peer."""
@@ -318,7 +319,7 @@ class MessagingService:
         framed = self._frame(msg.to_dict())
         await self._send_raw(self.peers[peer_id], framed)
     # ------------------------------------------------------------------
-    # NACK hook
+    # NACK Recv hook
     # ------------------------------------------------------------------
     async def if_negative_ack_received(self, peer_id: str, nack_payload: dict):
         self.node.logger.warning(f"NACK from {peer_id}: {nack_payload}")
@@ -328,7 +329,6 @@ class MessagingService:
 
         #variables to store the vector clokck info from nack payload
         their_vector_clock = nack_payload.get("my_vector_clock", {})
-        expected_seq = nack_payload.get("expected_seq", 0)
         if( not their_vector_clock):
             self.node.logger.warning(f"NACK from {peer_id} missing vector clock info.")
             return

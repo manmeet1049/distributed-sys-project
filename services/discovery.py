@@ -26,7 +26,6 @@ class DiscoveryService:
     # Multicast configuration
     MCAST_GRP = '224.0.0.251'
     MCAST_PORT = 50000
-    MCAST_PORT_STR = '50000'
     BROADCAST_INTERVAL = 5  # seconds
     PEER_TIMEOUT = 15  # seconds
 
@@ -107,7 +106,6 @@ class DiscoveryService:
         except AttributeError:
             pass  # Windows doesn't have SO_REUSEPORT
 
-        # Critical for Windows: bind to 0.0.0.0
         self.mcast_socket.bind(("0.0.0.0", self.MCAST_PORT))
 
         # Join multicast group - Windows uses INADDR_ANY
@@ -117,7 +115,7 @@ class DiscoveryService:
             # Optional: enable receiving own packets
             self.mcast_socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
         else:
-            # Linux/macOS: use a local IP if you want (optional, but safer) 
+            # Linux/macOS - specify the interface
             intf = _get_local_ip(self)
             self.mcast_socket.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, socket.inet_aton(self.MCAST_GRP)+socket.inet_aton(intf))
             # Optional: enable receiving own packets
@@ -127,7 +125,6 @@ class DiscoveryService:
                 socket.IP_MULTICAST_IF,
                 socket.inet_aton(intf)
             )
-
 
         self.mcast_socket.setblocking(False)
         self.logger.info(f"Multicast socket configured - Group: {self.MCAST_GRP}:{self.MCAST_PORT}")
@@ -197,38 +194,34 @@ class DiscoveryService:
             try:
                 try:
                     data, addr = self.mcast_socket.recvfrom(4096)
-                    # IMMEDIATE DEBUG — THIS WILL TELL US EVERYTHING
-                    # print(f"RAW PACKET: len={len(data)}  first_8_bytes={data[:8].hex()}  from={addr}")
                     # ────── CASE 1: Framed application message (our chat/multicast) ──────
                     if len(data) >= 4:
                         try:
                             length = struct.unpack("!I", data[:4])[0]
                             if len(data) == 4 + length:
-                                print(f"FRAMED MESSAGE DETECTED! payload_len={length}")
                                 # This is a chat message → forward to MessagingService
                                 if self.node.messaging:
-                                    print("inside messaging")
+                                    # print("inside messaging")
                                     try:
                                         msg_dict = json.loads(data[4:].decode('utf-8'))
-                                        print(msg_dict)
-                                        # THIS IS WHERE IT WAS CRASHING — NOW WITH FULL ERROR PRINT
-                                        try:
-                                            msg = Message.from_dict(msg_dict)
-                                            print("Message.from_dict() SUCCESS!")
-                                            print(f"   → sender_id: {msg.sender_id}")
-                                            print(f"   → payload text: {msg.payload.get('text', '[no text]')}")
-                                            print(f"   → vector_clock: {msg.vector_clock}")
+                                        # print(msg_dict)
+                                        msg = Message.from_dict(msg_dict)
+                                        # try:
+                                        #     print("Message.from_dict() SUCCESS!")
+                                        #     print(f"   → sender_id: {msg.sender_id}")
+                                        #     print(f"   → payload text: {msg.payload.get('text', '[no text]')}")
+                                        #     print(f"   → vector_clock: {msg.vector_clock}")
 
-                                        except Exception as e:
-                                            print("Message.from_dict() FAILED WITH ERROR:")
-                                            print(f"   ERROR TYPE: {type(e).__name__}")
-                                            print(f"   ERROR MESSAGE: {e}")
-                                            print(f"   FULL DICT THAT CAUSED CRASH: {msg_dict}")
-                                            import traceback
-                                            traceback.print_exc()  # prints the full stack trace
-                                            print("Falling back to manual Message creation...")
+                                        # except Exception as e:
+                                        #     print("Message.from_dict() FAILED WITH ERROR:")
+                                        #     print(f"   ERROR TYPE: {type(e).__name__}")
+                                        #     print(f"   ERROR MESSAGE: {e}")
+                                        #     print(f"   FULL DICT THAT CAUSED CRASH: {msg_dict}")
+                                        #     import traceback
+                                        #     traceback.print_exc()  # prints the full stack trace
+                                        #     print("Falling back to manual Message creation...")
                                         # msg = Message.from_dict(msg_dict)
-                                        print(f"Discovered framed message from {addr}: {msg.payload.get('text', msg.payload)}")
+                                        # print(f"Discovered framed message from {addr}: {msg.payload.get('text', msg.payload)}")
                                         # Fake the addr as (sender_ip, sender_port) — best effort
                                         await self.node.messaging._handle_incoming(None, addr, msg)
                                     except Exception as e:
@@ -244,7 +237,6 @@ class DiscoveryService:
                             await self._handle_peer_discovery(message, addr)
                     except (json.JSONDecodeError, UnicodeDecodeError):
                         pass  # ignore garbage
-                            
 
                 except BlockingIOError:
                     await asyncio.sleep(0.01)

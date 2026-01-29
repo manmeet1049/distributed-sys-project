@@ -12,7 +12,6 @@ from services.discovery import DiscoveryService
 from services.messaging_service import MessagingService
 from services.ring_service import RingService
 from services.leader_election import LeaderElectionService
-from Data.message import Message
 
 
 def setup_node_logging(node_id: str, level=logging.INFO) -> str:
@@ -121,9 +120,6 @@ class Node:
         print(f"\n{'='*60}")
         print(f"Node {self.name} initialized")
         print(f"UUID: {self.uuid}")
-        print(f"Listening on: {self.host}:{self.port}")
-        print(f"Logs written to: {self.log_file}")
-        print(f"{'='*60}\n")
         print(f"Listening on: {self.host}:{self.port}")
         print(f"Logs written to: {self.log_file}")
         print(f"{'='*60}\n")
