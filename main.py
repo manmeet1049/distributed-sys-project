@@ -33,9 +33,9 @@ def setup_node_logging(node_id: str, level=logging.INFO) -> str:
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     ))
 
-    # Configure console handler for minimal output (WARNING and above only)
+    # Configure console handler for minimal output (ERROR and above only)
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.WARNING)
+    console_handler.setLevel(logging.ERROR)
     console_handler.setFormatter(logging.Formatter(
         '%(levelname)s - %(message)s'
     ))
