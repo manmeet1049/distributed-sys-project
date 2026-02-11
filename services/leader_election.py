@@ -856,7 +856,7 @@ class LeaderElectionService:
         is_stable = await self.ring_service.wait_for_stable_ring(timeout=10.0)
         
         if not is_stable:
-            self.logger.warning("Ring did not stabilize in time, but proceeding with election check")
+            self.logger.debug("Ring did not stabilize in time, but proceeding with election check")
         
         # Re-check if a leader was already elected while we were waiting
         if self.leader_id is not None:

@@ -373,7 +373,7 @@ class RingService:
         # For simplicity, we accept any valid node from our peer list
         if claimed_pred in self.messaging.peers:
             self.predecessor_id = claimed_pred
-            self.logger.info(
+            self.logger.debug(
                 f"Updated predecessor to {claimed_pred} via NOTIFY")
 
     # ------------------------------------------------------------------
@@ -493,7 +493,7 @@ class RingService:
     def _mark_topology_change(self, reason: str = "unknown"):
         """Mark that the ring topology has changed."""
         self._last_topology_change = time.time()
-        self.logger.info(f"Ring topology changed: {reason}")
+        # self.logger.info(f"Ring topology changed: {reason}")
 
     def is_ring_stable(self) -> bool:
         """
